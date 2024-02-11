@@ -1,0 +1,5 @@
+Good documents to read:
+
+https://arxiv.org/pdf/1502.01633.pdf
+
+https://cs.ipm.ac.ir/asoc2016/Resources/Theartofmulticore.pdf
