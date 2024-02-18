@@ -94,24 +94,24 @@ class CMSet_Lock : public CMSet<T> {
             std::lock_guard<std::mutex> lock(mtx);
 
             Node<T>* current = this->head;
-            Node<T>* prev = nullptr;
+            Node<T>* pred = nullptr;
             while (current != nullptr) {
                 if (current->data == element) {
                     if (current->count > 1) { //if multiplicity/count is greater than 1, we just decrement by 1
                         current->count--;
                         return true;
                     } else {
-                        if (prev == nullptr) { //if there is no prev node, we set the 'head' to the succeeding node
+                        if (pred == nullptr) { //if there is no pred node, we set the 'head' to the succeeding node
                             this->head = current->next;
                         } else {
-                            prev->next = current->next; // pass prev's next value to current's succeeding node
+                            pred->next = current->next; // pass pred's next value to current's succeeding node
                         }
                         delete current; // physically remove current
                         return true;
                     }
                 }
                 //continue traversing linked list
-                prev = current;
+                pred = current;
                 current = current->next;
             }
 
@@ -305,46 +305,46 @@ class CMSet_O : public CMSet<T> {
         bool remove(const T& element) override {
             while (true) { // keep on re-trying, if the node is invalid when writing
                 Node<T>* current = this->head;
-                Node<T>* prev = nullptr;
+                Node<T>* pred = nullptr;
 
                 while (current != nullptr) {
                     if (current->data == element) {
-                        if (prev != nullptr) prev->mtx.lock();
+                        if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
                         if (isValid(current)) { // check if node is valid (not been deleted)
                             if (current->count > 1) { // if multiplicity/count is greater than 1, decrement by 1
                                 current->count--;
-                                if (prev != nullptr) prev->mtx.unlock();
+                                if (pred != nullptr) pred->mtx.unlock();
                                 current->mtx.unlock();
                                 return true;
                             } else {
-                                if (prev == nullptr) { // if there is no prev node, set the 'head' to the succeeding node
+                                if (pred == nullptr) { // if there is no pred node, set the 'head' to the succeeding node
                                     this->head = current->next;
                                 } else {
-                                    prev->next = current->next; // pass prev's next value to current's succeeding node
+                                    pred->next = current->next; // pass pred's next value to current's succeeding node
                                 }
-                                if (prev != nullptr) prev->mtx.unlock();
+                                if (pred != nullptr) pred->mtx.unlock();
                                 current->mtx.unlock();
                                 delete current; // physically remove current
                                 return true;
                             }
                         } else {
-                            if (prev != nullptr) prev->mtx.unlock();
+                            if (pred != nullptr) pred->mtx.unlock();
                             current->mtx.unlock();
                             break; // Invalid node, try again
                         }
                     }
                     // continue traversing linked list
-                    prev = current;
+                    pred = current;
                     current = current->next;
-                    if (prev != nullptr && prev != this->head) {
-                        prev->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
+                    if (pred != nullptr && pred != this->head) {
+                        pred->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
                     }
                 }
 
-                if (prev != nullptr && prev != this->head) {
-                    prev->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
+                if (pred != nullptr && pred != this->head) {
+                    pred->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
                 }
 
                 // If current is nullptr, we've not found the element, so return false
@@ -447,47 +447,46 @@ class CMSet_Lock_Free : public CMSet<T> {
         bool remove(const T& element) override {
             while (true) { // keep on re-trying, if the node is invalid when writing
                 Node<T>* current = this->head;
-                Node<T>* prev = nullptr;
+                Node<T>* pred = nullptr;
 
                 while (current != nullptr) {
                     if (current->data == element) {
-                        if (prev != nullptr) prev->mtx.lock();
+                        if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
-
-                        if (isValid(current)) { // check if node is valid (not been deleted)
+                        if (isValid(pred, current)) { // check if node is valid (not been deleted)
                             if (current->count > 1) { // if multiplicity/count is greater than 1, decrement by 1
                                 current->count--;
-                                if (prev != nullptr) prev->mtx.unlock();
+                                if (pred != nullptr) pred->mtx.unlock();
                                 current->mtx.unlock();
                                 return true;
                             } else {
-                                if (prev == nullptr) { // if there is no prev node, set the 'head' to the succeeding node
+                                if (pred == nullptr) { // if there is no pred node, set the 'head' to the succeeding node
                                     this->head = current->next;
                                 } else {
-                                    prev->next = current->next; // pass prev's next value to current's succeeding node
+                                    pred->next = current->next; // pass pred's next value to current's succeeding node
                                 }
-                                if (prev != nullptr) prev->mtx.unlock();
+                                if (pred != nullptr) pred->mtx.unlock();
                                 current->mtx.unlock();
                                 delete current; // physically remove current
                                 return true;
                             }
                         } else {
-                            if (prev != nullptr) prev->mtx.unlock();
+                            if (pred != nullptr) pred->mtx.unlock();
                             current->mtx.unlock();
                             break; // Invalid node, try again
                         }
                     }
                     // continue traversing linked list
-                    prev = current;
+                    pred = current;
                     current = current->next;
-                    if (prev != nullptr && prev != this->head) {
-                        prev->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
+                    if (pred != nullptr && pred != this->head) {
+                        pred->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
                     }
                 }
 
-                if (prev != nullptr && prev != this->head) {
-                    prev->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
+                if (pred != nullptr && pred != this->head) {
+                    pred->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
                 }
 
                 // If current is nullptr, we've not found the element, so return false
