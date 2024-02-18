@@ -1,7 +1,7 @@
 #include "CMSet.hpp"
 
 int main() {
-    CMSet_Lock<int> cmset;
+    CMSet_O<int> cmset;
 
     cmset.add(5);
     cmset.add(1);
@@ -15,5 +15,7 @@ int main() {
     bool removed = cmset.remove(5);
     std::cout << "Attempt to remove 5 was " << (removed ? "successful" : "unsuccessful") << std::endl;
 
+
+    return 0;
 
 }
