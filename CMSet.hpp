@@ -144,7 +144,7 @@ class CMSet_O : public CMSet<T> {
         * Method validates multi-state by checking if the node is reachable from the head (not deleted)
         * Notes for report: appreciating that this method might not the most sufficient, due to linear time complexity
         */
-        bool isValid(const Node<T>* element) const {
+        bool is_valid(const Node<T>* element) const {
             Node<T>* current = this->head;
 
 
@@ -168,7 +168,7 @@ class CMSet_O : public CMSet<T> {
             while (current != nullptr) {
                 if (current->data == element) { // if element are equal
                     current->mtx.lock();
-                    if (isValid(current)) { //check if node is valid (not been deleted)
+                    if (is_valid(current)) { //check if node is valid (not been deleted)
                         current->mtx.unlock();
                         return true; // element is found and valid
                     } else { //if node is not valid, probably deleted during traversal, so just ignore and continue traversal
@@ -200,8 +200,8 @@ class CMSet_O : public CMSet<T> {
                         if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
-                        if (isValid(current)) { //check if node is valid (not been deleted)
-                            if (pred == nullptr || isValid(pred)) { //we also check if predeccesor is also valid, or if we are at the head
+                        if (is_valid(current)) { //check if node is valid (not been deleted)
+                            if (pred == nullptr || is_valid(pred)) { //we also check if predeccesor is also valid, or if we are at the head
                                 // update the node as it exists and is valid 
                                 current->count++;
                                 if (pred != nullptr) pred->mtx.unlock();
@@ -256,7 +256,7 @@ class CMSet_O : public CMSet<T> {
 
                 if (current->data == element) { // if element are equal
                     current->mtx.lock();
-                    if (isValid(current)) { //check if node is valid (not been deleted)
+                    if (is_valid(current)) { //check if node is valid (not been deleted)
                         int count = current->count; //ensures that the unlock comes AFTER accessing this shared count
                         current->mtx.unlock();
                         return count;
@@ -281,7 +281,7 @@ class CMSet_O : public CMSet<T> {
 
         //             if (current->data == element) { // if element are equal
         //                 current->mtx.lock();
-        //                 if (isValid(current)) { //check if node is valid (not been deleted)
+        //                 if (is_valid(current)) { //check if node is valid (not been deleted)
         //                     int count = current->count; //ensures that the unlock comes AFTER accessing this shared count
         //                     current->mtx.unlock();
         //                     return count;
@@ -312,7 +312,7 @@ class CMSet_O : public CMSet<T> {
                         if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
-                        if (isValid(current)) { // check if node is valid (not been deleted)
+                        if (is_valid(current)) { // check if node is valid (not been deleted)
                             if (current->count > 1) { // if multiplicity/count is greater than 1, decrement by 1
                                 current->count--;
                                 if (pred != nullptr) pred->mtx.unlock();
@@ -357,7 +357,8 @@ class CMSet_O : public CMSet<T> {
 
 
 /**
- * Lazy Synchronisation
+ * Lock-free alg
+ *  w/Lazy Synchronisation
 */
 
 template <typename T>
@@ -365,129 +366,133 @@ class CMSet_Lock_Free : public CMSet<T> {
 
     private:
 
-        bool isValid(const Node<T>* pred, const Node<T>* current) const {
-            if(pred == nullptr) { //if predecessor is null
-                return !current.marked;
-            }
+        std::atomic<Node_A<T>*> head;
 
-            return !pred->marked && !current.marked && pred.next == current;
+        //mark a node as logically removed
+        bool mark_node_for_deletion(Node_A<T>* node) {
+            Node_A<T>* expected_next = node->next.load(std::memory_order_relaxed);
+            Node_A<T>* marked_next = reinterpret_cast<Node_A<T>*>(reinterpret_cast<uintptr_t>(expected_next) | 1); // sets the LSB to be 1 
+            return node->next.compare_exchange_strong(expected_next, marked_next, std::memory_order_release, std::memory_order_relaxed); // CAS checking if node->next is still expected_next
+        }
+
+        bool is_marked_for_deletion(Node_A<T>* node) {
+            Node_A<T>* next = node->next.load(std::memory_order_relaxed);
+            return reinterpret_cast<uintptr_t>(next) & 1; //checks if LSB has been set 
+        }
+
+        bool get_cleaned_reference(Node_A<T>* node_marked) {
+            return reinterpret_cast<Node_A<T>*>(reinterpret_cast<uintptr_t>(node_marked) & ~uintptr_t(1)); //clears LSB
         }
 
     public:
 
+        CMSet_Lock_Free() : CMSet<T>() {} //constructor
+
+
+        //Notes for report: WAIT- FREE!
         bool contains(const T& element) const override {
-            
-            
+            Node_A<T>* current = this->head.load(std::memory_order_acquire);
+
+            while (current != nullptr) {
+                //load next node out of comparison to avoid data race
+                Node_A<T>* next = current->next.load(std::memory_order_acquire);
+
+                if (!mark_node_for_deletion(next)) { // check if the node is marked for deletion
+                    if (current->data == element) {
+                        return true;
+                    }
+                }
+                current = current->next;
+            } 
+        
+            return false; //Element is not found
         }
 
         void add(const T& element) override {
-
-            Node<T>* pred = nullptr; //predecessor
-            Node<T>* current;
-
             while (true) { //keep on re-trying, if the node is invalid when writing
-                pred = nullptr;
-                current = this->head;
+                Node_A<T>* current = this->head.load(std::memory_order_acquire);
 
                 while (current != nullptr) {
-                    if (current->data == element) { // if element are equal
-                        if (pred != nullptr) pred->mtx.lock();
-                        current->mtx.lock();
 
-                        if (isValid(pred, current)) { //check if node is valid (not been deleted) (checks for marked)
-                            // update the node as it exists and is valid 
-                            current->count++;
-                            if (pred != nullptr) pred->mtx.unlock();
-                            current->mtx.unlock();
-                            return;
-                        }
+                    if (current->data == element) {
+                        // atomicallyincrease count, since element found
+                        int cnt = current->count.load(std::memory_order_acquire);
+                        if (current->count.compare_exchange_weak(cnt, cnt + 1)) {
+                            return true;
+                        } 
 
-                        // if current node or predecessor is not valid, unlock and retry
-                        if (pred != nullptr) pred->mtx.unlock();
-                        current->mtx.unlock();
-                        break; //break from loop, inorder to retry
-                    }
-
-                    // move to the next node, updating the predecessor and current pointers
-                    if (pred != nullptr) pred->mtx.unlock(); // unlock the previous predecessor
-                    pred = current;
-                    current = current->next;
+                        //if CAS fails (ue to another thread interaction), the loop will restart anyway and try agian
+                    } 
+                    
+                    current = current->next.load(std::memory_order_acquire);
                 }
 
 
+                //prepare new node for insertion
+                Node_A<T>* newNode = new Node_A<T>(element);
+                newNode->next.store(this->head.load(std::memory_order_acquire), std::memory_order_relaxed);
     
-                if (current == nullptr) { //if element does not exist
-
-                    //attempts to add new node at beginning 
-                    Node<T>* newNode = new Node<T>(element);
-                    if(this->head != nullptr) { //lock head
-                        this->head->mtx.lock(); 
-                    }
-
-
-                    newNode->next = this->head;
-                    this->head = newNode; 
-
-                    if(newNode->next != nullptr) {
-                        newNode->next->mtx.unlock(); //unlock old head
-                    }
-                    return; 
-
+                //attempt to insert new node at head
+                if (head.compare_exchange_weak(newNode->next, newNode, std::memory_order_release, std::memory_order_relaxed)) {
+                    return true;
                 }
 
+                delete newNode; //once again if CAS fails, another thread must have interfered, so delete newnode and retry ;-;
             }
 
         }
 
-        
+        //Notes for report: WAIT- FREE!
         int count(const T& element) const override {
+            Node<T>* current = this->head;
+                                    
+            while (current != nullptr) {
 
+                if (current->data == element && !current->marked) { // if element are equal and is not marked true
+                    return current->count;
+                }
+                current = current->next;
+            }
+
+            return 0;
         }
 
+
+        //Notes for report: leverages logical removals, for wait-free contains() and count()
         bool remove(const T& element) override {
             while (true) { // keep on re-trying, if the node is invalid when writing
-                Node<T>* current = this->head;
-                Node<T>* pred = nullptr;
+                Node_A<T>* current = this->head.load(std::memory_order_acquire);
+                Node_A<T>* pred = nullptr;
+                Node_A<T>  succ = nullptr;
 
                 while (current != nullptr) {
-                    if (current->data == element) {
-                        if (pred != nullptr) pred->mtx.lock();
-                        current->mtx.lock();
+                    succ = current->next.load(std::memory_order_acquire);
 
-                        if (isValid(pred, current)) { // check if node is valid (not been deleted)
-                            if (current->count > 1) { // if multiplicity/count is greater than 1, decrement by 1
-                                current->count--;
-                                if (pred != nullptr) pred->mtx.unlock();
-                                current->mtx.unlock();
-                                return true;
-                            } else {
-                                if (pred == nullptr) { // if there is no pred node, set the 'head' to the succeeding node
-                                    this->head = current->next;
-                                } else {
-                                    pred->next = current->next; // pass pred's next value to current's succeeding node
-                                }
-                                if (pred != nullptr) pred->mtx.unlock();
-                                current->mtx.unlock();
-                                delete current; // physically remove current
+                    if (current->data == element) {
+                        int cnt = current->count.load(std::memory_order_acquire);
+
+                        if (cnt > 1) {
+                            if (current->count.compare_exchange_weak(cnt, cnt - 1)) { //count is dealt with atomically, to ensure multiple threads can safely decrease count
                                 return true;
                             }
                         } else {
-                            if (pred != nullptr) pred->mtx.unlock();
-                            current->mtx.unlock();
-                            break; // Invalid node, try again
+                            if (mark_node_for_deletion(current)) {
+                               
+                                if (pred) {
+                                    pred->next.compare_exchange_strong(current, succ);
+                                } else {
+                                    head.compare_exchange_strong(current, succ);
+                                }
+                                // delete current; //physical removal
+                                return true;
+                            }
                         }
                     }
                     // continue traversing linked list
                     pred = current;
                     current = current->next;
-                    if (pred != nullptr && pred != this->head) {
-                        pred->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
-                    }
                 }
 
-                if (pred != nullptr && pred != this->head) {
-                    pred->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
-                }
 
                 // If current is nullptr, we've not found the element, so return false
                 if (current == nullptr) {

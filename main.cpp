@@ -1,7 +1,7 @@
 #include "CMSet.hpp"
 
 int main() {
-    CMSet_O<int> cmset;
+    CMSet_Lock_Free<int> cmset;
 
     cmset.add(5);
     cmset.add(1);
