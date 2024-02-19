@@ -19,8 +19,8 @@ class CMSet {
     CMSet() : head(nullptr) {} //constructor
 
     /*======= Abstract Methods ==========*/
-    virtual bool contains (const T& element) const = 0; //good practice to include the 'const' method signature
-    virtual int  count (const T& element) const = 0; //in other words, the multiplicity
+    virtual bool contains (const T& element) = 0; //good practice to include the 'const' method signature
+    virtual int  count (const T& element) = 0; //in other words, the multiplicity
     virtual void add (const T& element) = 0;
     virtual bool remove (const T& element) = 0;
 
@@ -42,7 +42,7 @@ class CMSet_Lock : public CMSet<T> {
 
         CMSet_Lock() : CMSet<T>() {} //constructor
 
-        bool contains(const T& element) const override {
+        bool contains(const T& element) override {
             std::lock_guard<std::mutex> lock(mtx); //RAII-style, meaning that lock is unlocked once we leave scope
 
             Node<T>* current = this->head;
@@ -57,7 +57,7 @@ class CMSet_Lock : public CMSet<T> {
         }
 
 
-        int count(const T& element) const override {
+        int count(const T& element) override {
             std::lock_guard<std::mutex> lock(mtx);
 
             Node<T>* current = this->head;
@@ -162,7 +162,7 @@ class CMSet_O : public CMSet<T> {
 
         CMSet_O() : CMSet<T>() {} //constructor
 
-        bool contains(const T& element) const override {
+        bool contains(const T& element) override {
             Node<T>* current = this->head;
 
             while (current != nullptr) {
@@ -248,7 +248,7 @@ class CMSet_O : public CMSet<T> {
 
         //Notes for report: Recognising that there's no modification of data structure, so concerns about locking 'pred' that we did in add/remove not as important.
         //but we still have to guarantee that the current node being read from has not been concurrently modified or deleted whilst accessing
-        int count(const T& element) const override {
+        int count(const T& element) override {
 
             Node<T>* current = this->head;
                                     
@@ -366,9 +366,11 @@ class CMSet_Lock_Free : public CMSet<T> {
 
     private:
 
-        std::atomic<Node_A<T>*> head;
+        std::atomic<Node_A<T>*> head = nullptr;
 
         //mark a node as logically removed
+        //note to self: the reinterpret_cast converts the next pointer to an unsigned integer of the same size, allowing bitwise operations on it
+        // possible due to modern architecturers having a 2-byte boundary for pointers :) 
         bool mark_node_for_deletion(Node_A<T>* node) {
             Node_A<T>* expected_next = node->next.load(std::memory_order_relaxed);
             Node_A<T>* marked_next = reinterpret_cast<Node_A<T>*>(reinterpret_cast<uintptr_t>(expected_next) | 1); // sets the LSB to be 1 
@@ -376,12 +378,12 @@ class CMSet_Lock_Free : public CMSet<T> {
         }
 
         bool is_marked_for_deletion(Node_A<T>* node) {
-            Node_A<T>* next = node->next.load(std::memory_order_relaxed);
-            return reinterpret_cast<uintptr_t>(next) & 1; //checks if LSB has been set 
+            Node_A<T>* next_node = node->next.load(std::memory_order_relaxed);
+            return reinterpret_cast<uintptr_t>(next_node) & 1; //checks if LSB has been set 
         }
 
-        bool get_cleaned_reference(Node_A<T>* node_marked) {
-            return reinterpret_cast<Node_A<T>*>(reinterpret_cast<uintptr_t>(node_marked) & ~uintptr_t(1)); //clears LSB
+        Node_A<T>* clean_marked_bit(Node_A<T>* node_marked) {
+            return reinterpret_cast<Node_A<T>*>(reinterpret_cast<uintptr_t>(node_marked) & ~uintptr_t(1)); //clears LSB, of the int representation of pointer. 
         }
 
     public:
@@ -390,19 +392,19 @@ class CMSet_Lock_Free : public CMSet<T> {
 
 
         //Notes for report: WAIT- FREE!
-        bool contains(const T& element) const override {
+        bool contains(const T& element) override {
             Node_A<T>* current = this->head.load(std::memory_order_acquire);
 
             while (current != nullptr) {
-                //load next node out of comparison to avoid data race
-                Node_A<T>* next = current->next.load(std::memory_order_acquire);
-
-                if (!mark_node_for_deletion(next)) { // check if the node is marked for deletion
+                if (!is_marked_for_deletion(current)) { // check if the node is marked for deletion
                     if (current->data == element) {
-                        return true;
+                        return true; //elemenet has been found
                     }
                 }
-                current = current->next;
+
+                 //load next node out of comparison to avoid data race
+                Node_A<T>* next = current->next.load(std::memory_order_acquire);
+                current = clean_marked_bit(next); //move to the next node
             } 
         
             return false; //Element is not found
@@ -412,13 +414,14 @@ class CMSet_Lock_Free : public CMSet<T> {
             while (true) { //keep on re-trying, if the node is invalid when writing
                 Node_A<T>* current = this->head.load(std::memory_order_acquire);
 
-                while (current != nullptr) {
 
+
+                while (current != nullptr) {
                     if (current->data == element) {
                         // atomicallyincrease count, since element found
                         int cnt = current->count.load(std::memory_order_acquire);
                         if (current->count.compare_exchange_weak(cnt, cnt + 1)) {
-                            return true;
+                            return; //success
                         } 
 
                         //if CAS fails (ue to another thread interaction), the loop will restart anyway and try agian
@@ -430,11 +433,14 @@ class CMSet_Lock_Free : public CMSet<T> {
 
                 //prepare new node for insertion
                 Node_A<T>* newNode = new Node_A<T>(element);
-                newNode->next.store(this->head.load(std::memory_order_acquire), std::memory_order_relaxed);
+                Node_A<T>* expected = this->head.load(std::memory_order_acquire);
+                newNode->next.store(expected, std::memory_order_relaxed);
+
+
     
                 //attempt to insert new node at head
-                if (head.compare_exchange_weak(newNode->next, newNode, std::memory_order_release, std::memory_order_relaxed)) {
-                    return true;
+                if (head.compare_exchange_weak(expected, newNode, std::memory_order_release, std::memory_order_relaxed)) {
+                    return; //success
                 }
 
                 delete newNode; //once again if CAS fails, another thread must have interfered, so delete newnode and retry ;-;
@@ -443,15 +449,19 @@ class CMSet_Lock_Free : public CMSet<T> {
         }
 
         //Notes for report: WAIT- FREE!
-        int count(const T& element) const override {
-            Node<T>* current = this->head;
+        int count(const T& element) override {
+            Node_A<T>* current = this->head.load(std::memory_order_acquire);
                                     
             while (current != nullptr) {
 
-                if (current->data == element && !current->marked) { // if element are equal and is not marked true
-                    return current->count;
+                if (!is_marked_for_deletion(current)) { // if element are equal and is not marked true
+                    if (current->data == element) {
+                        return true;
+                    }
                 }
-                current = current->next;
+
+                Node_A<T>* next = current->next.load(std::memory_order_acquire);
+                current = clean_marked_bit(next);
             }
 
             return 0;
@@ -463,34 +473,35 @@ class CMSet_Lock_Free : public CMSet<T> {
             while (true) { // keep on re-trying, if the node is invalid when writing
                 Node_A<T>* current = this->head.load(std::memory_order_acquire);
                 Node_A<T>* pred = nullptr;
-                Node_A<T>  succ = nullptr;
+                Node_A<T>*  succ = nullptr;
 
                 while (current != nullptr) {
                     succ = current->next.load(std::memory_order_acquire);
 
-                    if (current->data == element) {
-                        int cnt = current->count.load(std::memory_order_acquire);
+                    if (is_marked_for_deletion(succ)) { //first, its important to checkif successor node is marked for deletion
+                        Node_A<T>* succ_next = clean_marked_bit(succ->next.load(std::memory_order_acquire));
+                        if (current->next.compare_exchange_strong(succ, succ_next)) {
+                            //possible memory reclamation?
+                        } 
+                    } else { //if succ node is not marked
+                        if (current->data == element) {
 
-                        if (cnt > 1) {
-                            if (current->count.compare_exchange_weak(cnt, cnt - 1)) { //count is dealt with atomically, to ensure multiple threads can safely decrease count
+                            if(!mark_node_for_deletion(current)) {
+                                break; //CAS inside Mark method failed, restart loop to retry
+                            }
+
+                            //physical unlink
+                            if (pred->next.compare_exchange_strong(current, succ)) {
+                                // delete current;
                                 return true;
                             }
-                        } else {
-                            if (mark_node_for_deletion(current)) {
-                               
-                                if (pred) {
-                                    pred->next.compare_exchange_strong(current, succ);
-                                } else {
-                                    head.compare_exchange_strong(current, succ);
-                                }
-                                // delete current; //physical removal
-                                return true;
-                            }
+
+                            break; //CAS failed for physical unlink, restart loop to retry
                         }
                     }
                     // continue traversing linked list
                     pred = current;
-                    current = current->next;
+                    current = clean_marked_bit(succ);
                 }
 
 
