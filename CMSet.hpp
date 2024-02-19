@@ -488,13 +488,15 @@ class CMSet_Lock_Free : public CMSet<T> {
                         if (current->data == element) {
                             int cnt = current->count.load(std::memory_order_acquire);
                             if (cnt > 1) { //if multiplicity/count is greater than 1, decrement by 1
-                                current->count.compare_exchange_weak()
+                                current->count.compare_exchange_weak(cnt, cnt - 1);
+                                return true; //successful removal
                             }
+                            
                             if(!mark_node_for_deletion(current)) {
                                 break; //CAS inside Mark method failed, restart loop to retry
                             }
 
-                            //physical unlink
+                            // otherwise if CAS success, physical unlink
                             if (pred->next.compare_exchange_strong(current, succ)) {
                                 // delete current;
                                 return true;
