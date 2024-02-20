@@ -142,17 +142,17 @@ class CMSet_O : public CMSet<T> {
 
         /**
         * Method validates multi-state by checking if the node is reachable from the head (not deleted)
-        * Notes for report: appreciating that this method might not the most sufficient, due to linear time complexity
+        * It also checks if the predecessor node actually points to the current node (this may have also been modified)
         */
-        bool is_valid(const Node<T>* element) const {
-            Node<T>* current = this->head;
+        bool is_valid(const Node<T>* pred, const Node<T>* current) const {
+            Node<T>* c = this->head;
 
-
-            while (current != nullptr) {
-                if (current == element) {
-                    return true;
+            while (c != nullptr) {
+                if (c == current) {
+                    if (pred == nullptr) return true; //if pred is null, then we skip the pred->next = current check
+                    return pred->next == c;
                 }
-                current = current->next;
+                c = c->next;
             }
 
             return false;
@@ -164,28 +164,40 @@ class CMSet_O : public CMSet<T> {
 
         bool contains(const T& element) override {
             Node<T>* current = this->head;
+            Node<T>* pred = nullptr;
 
-            while (current != nullptr) {
-                if (current->data == element) { // if element are equal
-                    current->mtx.lock();
-                    if (is_valid(current)) { //check if node is valid (not been deleted)
+            while (true) {
+                current = this->head;
+                pred = nullptr;
+
+                while (current != nullptr) {
+                    if (current->data == element) { // if element are equal
+                        if (pred != nullptr) pred->mtx.lock();
+                        current->mtx.lock();
+
+                        if (is_valid(pred, current)) { //check if node is valid (not been deleted)
+                            if (pred != nullptr) pred->mtx.unlock();
+                            current->mtx.unlock();
+                            return true; // element is found and valid
+                        }   
+                        //if node is not valid, probably deleted during traversal, so unlock and retry
+                        if (pred != nullptr) pred->mtx.unlock();
                         current->mtx.unlock();
-                        return true; // element is found and valid
-                    } else { //if node is not valid, probably deleted during traversal, so just ignore and continue traversal
-                        current->mtx.unlock();
+                        break; //break from loop, in order to retry
+                
                     }
-                }
-                current = current->next;
-            } 
-        
-            return false; //Element is not found
+                    pred = current;
+                    current = current->next;
+                } 
+            
+                return false; //Element is not found
+            }
         }
 
 
         //Notes for report:
         // includes predecessor tracking and then locking the predecessor ensures that no toher thread can modify the 'next' pointer of the predecessor at the same time,
         // also list integrity is maintained this way, preventing dangling pointers or broken chains, this could happen if another thread concurrently changes the list structure.
-
         void add(const T& element) override {
 
             Node<T>* pred = nullptr; //predecessor
@@ -200,14 +212,12 @@ class CMSet_O : public CMSet<T> {
                         if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
-                        if (is_valid(current)) { //check if node is valid (not been deleted)
-                            if (pred == nullptr || is_valid(pred)) { //we also check if predeccesor is also valid, or if we are at the head
-                                // update the node as it exists and is valid 
-                                current->count++;
-                                if (pred != nullptr) pred->mtx.unlock();
-                                current->mtx.unlock();
-                                return;
-                            }
+                        if (is_valid(pred, current)) { //check if node is valid (not been deleted)
+                            // update the node as it exists and is valid 
+                            current->count++;
+                            if (pred != nullptr) pred->mtx.unlock();
+                            current->mtx.unlock();
+                            return;
                         }
 
                         // if current node or predecessor is not valid, unlock and retry
@@ -218,6 +228,7 @@ class CMSet_O : public CMSet<T> {
 
                     // move to the next node, updating the predecessor and current pointers
                     if (pred != nullptr) pred->mtx.unlock(); // unlock the previous predecessor
+
                     pred = current;
                     current = current->next;
                 }
@@ -249,58 +260,38 @@ class CMSet_O : public CMSet<T> {
         //Notes for report: Recognising that there's no modification of data structure, so concerns about locking 'pred' that we did in add/remove not as important.
         //but we still have to guarantee that the current node being read from has not been concurrently modified or deleted whilst accessing
         int count(const T& element) override {
-
             Node<T>* current = this->head;
-                                    
-            while (current != nullptr) {
+            Node<T>* pred = nullptr;
 
-                if (current->data == element) { // if element are equal
-                    current->mtx.lock();
-                    if (is_valid(current)) { //check if node is valid (not been deleted)
-                        int count = current->count; //ensures that the unlock comes AFTER accessing this shared count
+            while (true) {
+                current = this->head;
+                pred = nullptr;
+
+                while (current != nullptr) {
+                    if (current->data == element) { // if element are equal
+                        if (pred != nullptr) pred->mtx.lock();
+                        current->mtx.lock();
+
+                        if (is_valid(pred, current)) { //check if node is valid (not been deleted)
+                            int count = current->count; //note: this is before the unlocks, placing it after exposes us to race conditions
+                            if (pred != nullptr) pred->mtx.unlock();
+                            current->mtx.unlock();
+                            return count; // element is found and valid
+                        }   
+                        //if node is not valid, probably deleted during traversal, so unlock and retry
+                        if (pred != nullptr) pred->mtx.unlock();
                         current->mtx.unlock();
-                        return count;
-                    } else {
-                        current->mtx.unlock(); //if current node is invalid, unlock and continue the search/traversal, no need to retry from the beginning
-                        break;
+                        break; //break from loop, in order to retry
+                
                     }
-                }
-                current = current->next;
+                    pred = current;
+                    current = current->next;
+                } 
+            
+                return 0; //Element is not found
             }
-
-            return 0;
         }
 
-        // OLD-INEFFICIENT METHOD - It is kind of pointless to restart the traversal if it encounters an invalid node, not necessary for just counting occurences
-        // int count(const T& element) const override {
-
-        //     while (true) { //keep on re-trying, if the node is invalid when writing
-        //         Node<T>* current = this->head;
-                                    
-        //         while (current != nullptr) {
-
-        //             if (current->data == element) { // if element are equal
-        //                 current->mtx.lock();
-        //                 if (is_valid(current)) { //check if node is valid (not been deleted)
-        //                     int count = current->count; //ensures that the unlock comes AFTER accessing this shared count
-        //                     current->mtx.unlock();
-        //                     return count;
-        //                 } else {
-        //                     current->mtx.unlock();
-        //                     break;
-        //                 }
-        //             }
-        //             current = current->next;
-        //         }
-
-        //         if(current == nullptr) {
-        //             return 0; // does not exist
-        //         }
-
-
-        //     }
-            
-        // }
 
         bool remove(const T& element) override {
             while (true) { // keep on re-trying, if the node is invalid when writing
@@ -312,7 +303,7 @@ class CMSet_O : public CMSet<T> {
                         if (pred != nullptr) pred->mtx.lock();
                         current->mtx.lock();
 
-                        if (is_valid(current)) { // check if node is valid (not been deleted)
+                        if (is_valid(pred, current)) { // check if node is valid 
                             if (current->count > 1) { // if multiplicity/count is greater than 1, decrement by 1
                                 current->count--;
                                 if (pred != nullptr) pred->mtx.unlock();
@@ -326,7 +317,7 @@ class CMSet_O : public CMSet<T> {
                                 }
                                 if (pred != nullptr) pred->mtx.unlock();
                                 current->mtx.unlock();
-                                delete current; // physically remove current
+                                // delete current; // physically remove current
                                 return true;
                             }
                         } else {
@@ -338,14 +329,14 @@ class CMSet_O : public CMSet<T> {
                     // continue traversing linked list
                     pred = current;
                     current = current->next;
-                    if (pred != nullptr && pred != this->head) {
-                        pred->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
-                    }
+                    // if (pred != nullptr && pred != this->head) {
+                    //     pred->mtx.unlock();  // Optimisation: unlock the previous node early to reduce additional lock contention
+                    // }
                 }
 
-                if (pred != nullptr && pred != this->head) {
-                    pred->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
-                }
+                // if (pred != nullptr && pred != this->head) {
+                //     pred->mtx.unlock(); //ensure the predecessor is unlocked if we exit the loop
+                // }
 
                 // If current is nullptr, we've not found the element, so return false
                 if (current == nullptr) {
@@ -491,7 +482,7 @@ class CMSet_Lock_Free : public CMSet<T> {
                                 current->count.compare_exchange_weak(cnt, cnt - 1);
                                 return true; //successful removal
                             }
-                            
+
                             if(!mark_node_for_deletion(current)) {
                                 break; //CAS inside Mark method failed, restart loop to retry
                             }
